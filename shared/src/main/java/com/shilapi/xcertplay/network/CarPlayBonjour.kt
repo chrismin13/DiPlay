@@ -173,6 +173,15 @@ class CarPlayBonjour(
     private val multicastLock = (context.applicationContext ?: context)
         .getSystemService(WifiManager::class.java)
         .createMulticastLock("carplay-bonjour").apply { setReferenceCounted(false) }
+    // Wi-Fi power save holds the iPhone's video until the next beacon (about 100 ms); a Nexus 7 (2013)
+    // with it on pinged at 4–800 ms. Android 10 added a low-latency mode that also turns it off.
+    @Suppress("DEPRECATION")
+    private val wifiLock = (context.applicationContext ?: context)
+        .getSystemService(WifiManager::class.java)
+        .createWifiLock(
+            if (Build.VERSION.SDK_INT >= 29) WifiManager.WIFI_MODE_FULL_LOW_LATENCY else WifiManager.WIFI_MODE_FULL_HIGH_PERF,
+            "carplay-video",
+        ).apply { setReferenceCounted(false) }
 
     private var started = false
     @Volatile
@@ -274,6 +283,7 @@ class CarPlayBonjour(
             started = true
             try {
                 multicastLock.acquire()
+                runCatching { wifiLock.acquire() }.onFailure { Log.w(TAG, "Wi-Fi lock unavailable", it) }
                 if (useInterfaceMdns) {
                     requireNotNull(localAdvertisedAddress) {
                         "Interface mDNS requires a local advertised address"
@@ -320,6 +330,7 @@ class CarPlayBonjour(
                 interfaceMdns.forEach { dns -> runCatching { dns.close() } }
                 interfaceMdns.clear()
                 publishedFamilies = "none"
+                if (wifiLock.isHeld) wifiLock.release()
                 if (multicastLock.isHeld) multicastLock.release()
                 throw error
             }
@@ -352,6 +363,7 @@ class CarPlayBonjour(
             worker = null
             workerToJoin?.interrupt()
             if (multicastLock.isHeld) multicastLock.release()
+            if (wifiLock.isHeld) wifiLock.release()
         }
         dnsToClose.forEach { dns -> runCatching { dns.close() } }
         workerToJoin?.let(::joinWorker)

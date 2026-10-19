@@ -33,6 +33,7 @@ class CarPlayBonjourDualStackTest {
     private val context = mock(Context::class.java)
     private val wifi = mock(WifiManager::class.java)
     private val lock = mock(WifiManager.MulticastLock::class.java)
+    private val wifiLock = mock(WifiManager.WifiLock::class.java)
     private val ipv4 = InetAddress.getByName("192.0.2.10")
     private val ipv6 = Inet6Address.getByAddress(null, InetAddress.getByName("fe80::1234").address, 7)
     private val config = AirPlayConfig(deviceName = "DiPlay", deviceId = "02:00:00:00:00:02",
@@ -45,6 +46,8 @@ class CarPlayBonjourDualStackTest {
         `when`(context.getSystemService(WifiManager::class.java)).thenReturn(wifi)
         `when`(wifi.createMulticastLock("carplay-bonjour")).thenReturn(lock)
         `when`(lock.isHeld).thenReturn(true)
+        `when`(wifi.createWifiLock(WifiManager.WIFI_MODE_FULL_LOW_LATENCY, "carplay-video")).thenReturn(wifiLock)
+        `when`(wifiLock.isHeld).thenReturn(true)
     }
 
     @Test fun publishesAndBrowsesBothFamiliesAndClosesBothRegistries() {
@@ -69,6 +72,8 @@ class CarPlayBonjourDualStackTest {
             verify(v6).close()
             verify(v4).close()
             verify(lock).release()
+            verify(wifiLock).acquire()
+            verify(wifiLock).release()
         }
     }
 

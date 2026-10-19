@@ -7,6 +7,7 @@ import android.os.Build
 import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.Canvas
+import android.graphics.drawable.BitmapDrawable
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
 import android.os.Handler
@@ -14,6 +15,7 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
+import android.widget.ImageView
 import android.widget.SeekBar
 import android.widget.Switch
 import android.widget.RadioButton
@@ -60,6 +62,8 @@ class CarPlayHostSettingsTest {
         controllers = mockConstruction(CarPlayController::class.java)
         (field("teardownExecutor") as ExecutorService).shutdownNow()
         setField("teardownExecutor", PausedExecutorService())
+        (field("iconExecutor") as ExecutorService).shutdownNow()
+        setField("iconExecutor", PausedExecutorService())
         setField("airPlayIdentity", AirPlayIdentity.generate())
         val sizeClass = Class.forName("com.shilapi.xcertplay.CarPlayHostActivity\$DisplaySize")
         val size = sizeClass.getDeclaredConstructor(Int::class.javaPrimitiveType, Int::class.javaPrimitiveType)
@@ -78,6 +82,8 @@ class CarPlayHostSettingsTest {
         (field("mainHandler") as Handler).removeCallbacksAndMessages(null)
         (field("teardownExecutor") as ExecutorService).shutdownNow()
         (field("airPlayCommandExecutor") as ExecutorService).shutdownNow()
+        (field("iconExecutor") as ExecutorService).shutdownNow()
+        AirPlayPersistence.clearCustomAirPlayIcon(activity)
         CarPlayBackgroundSession.clear()
         controllers.close()
     }
@@ -284,6 +290,43 @@ class CarPlayHostSettingsTest {
     @Config(qualifiers = "ar-rSA-w600dp-h720dp-mdpi")
     @GraphicsMode(GraphicsMode.Mode.NATIVE)
     fun arabicGroupedMenuScreenshot() = checkSwipeMenuScreenshot("grouped-swipe-arabic-large-font.png", 600, 720)
+
+    @Test fun openingAndClosingLeavesAnUnchangedIconAloneAndDecodesItOffTheMainThread() {
+        val icon = activity.resources.openRawResource(R.raw.placeholder_icon).use { it.readBytes() }
+        AirPlayPersistence.saveCustomAirPlayIcon(activity, icon)
+        val file = AirPlayPersistence.loadCustomAirPlayIconFile(activity)!!.apply { setLastModified(1_000_000L) }
+        runIconWork()
+        invoke("openSettingsMenu")
+        val preview = field("iconPreviewView") as ImageView
+        // Opening only queues the icon work; the main thread neither reads nor decodes the file.
+        assertNull(preview.drawable)
+        assertTrue(runIconWork() > 0)
+        val bitmap = (preview.drawable as BitmapDrawable).bitmap
+        assertTrue("preview decoded at ${bitmap.width} px", bitmap.width < 1024)
+        assertTrue(bitmap.width >= activity.resources.displayMetrics.density * 72)
+        assertEquals(activity.getString(R.string.custom_1_1_icon), (field("iconStatusView") as TextView).text)
+
+        invoke("cancelSettingsEdits")
+        runIconWork()
+        assertEquals(1_000_000L, file.lastModified())
+        assertArrayEquals(icon, file.readBytes())
+    }
+
+    @Test fun cancellingPutsBackAnIconTheMenuReset() {
+        val icon = activity.resources.openRawResource(R.raw.placeholder_icon).use { it.readBytes() }
+        AirPlayPersistence.saveCustomAirPlayIcon(activity, icon)
+        invoke("openSettingsMenu")
+        runIconWork()
+        views(menu()).filterIsInstance<Button>()
+            .first { it.text == activity.getString(R.string.default_icon) }.performClick()
+        runIconWork()
+        assertNull(AirPlayPersistence.loadCustomAirPlayIconFile(activity))
+        assertEquals(activity.getString(R.string.default_placeholder_icon), (field("iconStatusView") as TextView).text)
+
+        invoke("cancelSettingsEdits")
+        runIconWork()
+        assertArrayEquals(icon, AirPlayPersistence.loadCustomAirPlayIconFile(activity)!!.readBytes())
+    }
 
     @Test fun closeButtonDiscardsEditsWithoutRestartingCarPlay() {
         val controller = attachController()
@@ -947,6 +990,7 @@ class CarPlayHostSettingsTest {
         }
         if (name.contains("grouped")) setField("settingsMenuCategoryKey", "display")
         invoke("openSettingsMenu")
+        runIconWork()
         val root = menu()
         repeat(3) {
             root.measure(View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
@@ -1023,6 +1067,12 @@ class CarPlayHostSettingsTest {
     private fun views(view: View): Sequence<View> = sequence {
         yield(view)
         if (view is ViewGroup) for (index in 0 until view.childCount) yieldAll(views(view.getChildAt(index)))
+    }
+    /** Runs the queued icon I/O and shows its result; returns how many tasks ran. */
+    private fun runIconWork(): Int {
+        val ran = (field("iconExecutor") as PausedExecutorService).runAll()
+        shadowOf(Looper.getMainLooper()).idle()
+        return ran
     }
     private fun invoke(name: String): Any? = activity.javaClass.getDeclaredMethod(name)
         .apply { isAccessible = true }.invoke(activity)

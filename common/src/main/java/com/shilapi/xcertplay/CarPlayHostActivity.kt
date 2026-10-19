@@ -125,6 +125,8 @@ import java.util.Date
 import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.roundToInt
 
@@ -138,7 +140,8 @@ import kotlin.math.roundToInt
 class CarPlayHostActivity : ComponentActivity() {
     private data class SettingsBaseline(
         val safeAreaRects: MutableMap<DisplaySize, SafeAreaRect?>,
-        val customIconBytes: ByteArray?,
+        // Touched only on [iconExecutor].
+        val customIcon: CustomAirPlayIconRollback,
     )
 
     private data class PendingAssignedSiriDoublePress(
@@ -702,6 +705,9 @@ class CarPlayHostActivity : ComponentActivity() {
     }
     private val teardownExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val airPlayCommandExecutor: ExecutorService = Executors.newSingleThreadExecutor()
+    // Reads, writes and decodes the custom car-button icon in order, away from the touch path.
+    private val iconExecutor: ExecutorService = Executors.newSingleThreadExecutor()
+    private var iconPreviewGeneration = 0
     private val logLines = ArrayDeque<LogEntry>()
     private val expireOldLogLines = Runnable { refreshLogView(System.currentTimeMillis()) }
     private val refreshTurnOverlay = object : Runnable {
@@ -1867,6 +1873,8 @@ class CarPlayHostActivity : ComponentActivity() {
 
     override fun onDestroy() {
         mainHandler.removeCallbacks(hideTemporarySystemBars)
+        // Queued icon work still finishes, so a discarded icon edit is not lost.
+        iconExecutor.shutdown()
         discardLastPicture()
         if (pictureCopyThreadStarted) pictureCopyThread.quitSafely()
         resetSidePanel()
@@ -3494,18 +3502,28 @@ class CarPlayHostActivity : ComponentActivity() {
 
     private fun captureSettingsBaseline(): SettingsBaseline {
         val safeAreaSize = currentActivitySize()
-        val customIconBytes = try {
-            AirPlayPersistence.loadCustomAirPlayIconFile(this)?.readBytes()
-        } catch (error: Exception) {
-            Log.w(TAG, "Could not read the current AirPlay icon for settings rollback", error)
-            null
-        }
+        val customIcon = CustomAirPlayIconRollback(this)
+        runIconIo(customIcon::capture)
         return SettingsBaseline(
             safeAreaRects = mutableMapOf<DisplaySize, SafeAreaRect?>().apply {
                 safeAreaSize?.let { put(it, AirPlayPersistence.loadSafeAreaRect(this@CarPlayHostActivity, it.width, it.height)) }
             },
-            customIconBytes = customIconBytes,
+            customIcon = customIcon,
         )
+    }
+
+    private fun runIconIo(task: () -> Unit) {
+        try {
+            iconExecutor.execute(task)
+        } catch (_: RejectedExecutionException) {
+            // The activity is gone; nothing shows or keeps this icon work any more.
+        }
+    }
+
+    /** Keeps the icon the menu opened with before the menu replaces or removes it. */
+    private fun retainSettingsBaselineIcon() {
+        val customIcon = settingsBaseline?.customIcon ?: return
+        runIconIo(customIcon::retainOriginal)
     }
 
     private fun restoreSettingsBaseline() {
@@ -3529,13 +3547,7 @@ class CarPlayHostActivity : ComponentActivity() {
                 commit = true,
             )
         }
-        try {
-            baseline.customIconBytes?.let { bytes ->
-                AirPlayPersistence.saveCustomAirPlayIcon(this, bytes)
-            } ?: AirPlayPersistence.clearCustomAirPlayIcon(this)
-        } catch (error: Exception) {
-            Log.w(TAG, "Could not restore the previous AirPlay icon", error)
-        }
+        runIconIo { baseline.customIcon.restore() }
         settingsBaseline = null
         locationPermissionAvailable = hasFineLocationPermission()
         hotspotStatus = HotspotStatus(state = if (wirelessEnabled) getString(R.string.hotspot_state_stopped) else getString(R.string.hotspot_state_off))
@@ -3910,7 +3922,7 @@ class CarPlayHostActivity : ComponentActivity() {
         }
         row.addView(
             preview,
-            LinearLayout.LayoutParams(dp(72), dp(72)),
+            LinearLayout.LayoutParams(dp(ICON_PREVIEW_DP), dp(ICON_PREVIEW_DP)),
         )
         val actions = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -3921,6 +3933,7 @@ class CarPlayHostActivity : ComponentActivity() {
                 style(DiPlayButtonKind.SECONDARY, overlayPalette, overlay = true)
                 setOnClickListener {
                     externalActivityInProgress = true
+                    retainSettingsBaselineIcon()
                     launchCarButtonImagePicker(
                         openDocument = { imageDocumentPicker.launch(arrayOf("image/*")) },
                         getContent = { imagePicker.launch("image/*") },
@@ -3944,7 +3957,8 @@ class CarPlayHostActivity : ComponentActivity() {
                 text = getString(R.string.default_icon)
                 style(DiPlayButtonKind.SECONDARY, overlayPalette, overlay = true)
                 setOnClickListener {
-                    AirPlayPersistence.clearCustomAirPlayIcon(this@CarPlayHostActivity)
+                    retainSettingsBaselineIcon()
+                    runIconIo { AirPlayPersistence.clearCustomAirPlayIcon(this@CarPlayHostActivity) }
                     updateAirPlayIconPreview()
                 }
             },
@@ -5048,20 +5062,45 @@ class CarPlayHostActivity : ComponentActivity() {
         // Shown in CarPlay's app list as the "back to the car" button.
         resources.openRawResource(R.raw.ic_car_home).use { it.readBytes() }
 
+    /** Decodes the icon on [iconExecutor] at about the preview's size and shows it when ready. */
     private fun updateAirPlayIconPreview() {
         val preview = iconPreviewView ?: return
-        val custom = AirPlayPersistence.loadCustomAirPlayIconFile(this)
-        var customBitmap: Bitmap? = null
-        if (custom != null) {
-            customBitmap = BitmapFactory.decodeFile(custom.absolutePath)
-            if (customBitmap == null) {
-                AirPlayPersistence.clearCustomAirPlayIcon(this)
+        val generation = ++iconPreviewGeneration
+        val targetPixels = dp(ICON_PREVIEW_DP)
+        val customIcon = settingsBaseline?.customIcon
+        runIconIo {
+            var customBitmap: Bitmap? = null
+            val custom = AirPlayPersistence.loadCustomAirPlayIconFile(this)
+            if (custom != null) {
+                customBitmap = decodeIconPreview(targetPixels) { options ->
+                    BitmapFactory.decodeFile(custom.absolutePath, options)
+                }
+                if (customBitmap == null) {
+                    customIcon?.retainOriginal()
+                    AirPlayPersistence.clearCustomAirPlayIcon(this)
+                }
+            }
+            // A raw resource, so decode the stream: decodeResource would scale it up to the screen density.
+            val bitmap = customBitmap ?: decodeIconPreview(targetPixels) { options ->
+                resources.openRawResource(R.raw.placeholder_icon).use { BitmapFactory.decodeStream(it, null, options) }
+            }
+            val isCustom = customBitmap != null
+            mainHandler.post {
+                if (isDestroyed || generation != iconPreviewGeneration || iconPreviewView !== preview) return@post
+                preview.setImageBitmap(bitmap)
+                iconStatusView?.text =
+                    if (isCustom) getString(R.string.custom_1_1_icon) else getString(R.string.default_placeholder_icon)
             }
         }
-        val bitmap = customBitmap ?: BitmapFactory.decodeResource(resources, R.raw.placeholder_icon)
-        preview.setImageBitmap(bitmap)
-        iconStatusView?.text =
-            if (customBitmap != null) getString(R.string.custom_1_1_icon) else getString(R.string.default_placeholder_icon)
+    }
+
+    private fun decodeIconPreview(targetPixels: Int, decode: (BitmapFactory.Options) -> Bitmap?): Bitmap? {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        decode(bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+        return decode(BitmapFactory.Options().apply {
+            inSampleSize = AirPlayIconSizing.previewSampleSize(bounds.outWidth, bounds.outHeight, targetPixels)
+        })
     }
 
     private fun currentActivitySize(): DisplaySize? {
@@ -6220,7 +6259,12 @@ class CarPlayHostActivity : ComponentActivity() {
             applicationContext.stopService(Intent(applicationContext, DiPlaySessionService::class.java))
             teardownExecutor.shutdown()
             mainHandler.post { completion() }
-            if (terminateProcess) Process.killProcess(Process.myPid())
+            if (terminateProcess) {
+                // Let a discarded icon edit reach the disk before the process ends.
+                iconExecutor.shutdown()
+                runCatching { iconExecutor.awaitTermination(ICON_IO_EXIT_WAIT_MILLIS, TimeUnit.MILLISECONDS) }
+                Process.killProcess(Process.myPid())
+            }
         }
     }
 
@@ -6731,6 +6775,8 @@ class CarPlayHostActivity : ComponentActivity() {
         /** How long the side panel tab's pill (and the panel's grip) shows when it appears or is tapped. */
         const val SIDE_PANEL_TAB_HINT_MILLIS = 10_000L
         const val TAG = "xcertplay-usb"
+        const val ICON_PREVIEW_DP = 72
+        const val ICON_IO_EXIT_WAIT_MILLIS = 2_000L
         const val SCREEN_TYPE_MAIN = 110
         const val SCREEN_TYPE_ALT = 111
         // On the teardown thread: bounded sequencing wait. Release notification retains ownership beyond

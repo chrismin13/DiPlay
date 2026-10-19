@@ -16,12 +16,16 @@ object CarPlayTouchMapper {
         val action = event.actionMasked
         val liftedIndex = if (action == MotionEvent.ACTION_POINTER_UP) event.actionIndex else -1
         val allUp = action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL
-        val count = minOf(MAX_CONTACTS, event.pointerCount)
-        val contacts = ArrayList<AirPlayContact>(count)
-        for (index in 0 until count) {
+        val contacts = ArrayList<AirPlayContact>(MAX_CONTACTS)
+        for (index in 0 until event.pointerCount) {
+            // The pointer id, not the index, names a finger: when the first finger of a pinch lifts, the
+            // second becomes index 0, and an index-based contact 0 would jump to it. Android hands out the
+            // lowest free id, so two fingers keep 0 and 1; a third finger is not sent.
+            val id = event.getPointerId(index)
+            if (id >= MAX_CONTACTS) continue
             contacts.add(
                 AirPlayContact(
-                    id = index,
+                    id = id,
                     x = ((event.getX(index) - content.left).toDouble() / width).coerceIn(0.0, 1.0),
                     y = ((event.getY(index) - content.top).toDouble() / height).coerceIn(0.0, 1.0),
                     down = !allUp && index != liftedIndex,

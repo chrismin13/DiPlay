@@ -52,6 +52,31 @@ class CarPlayTouchMapperTest {
         }
     }
 
+    @Test fun theSecondFingerKeepsItsIdentityAfterTheFirstLifts() {
+        // A pinch whose first finger (id 0) has lifted: the second finger (id 1) is now index 0.
+        val remaining = pointers(MotionEvent.ACTION_MOVE, 1 to (960f to 471f))
+        val contact = CarPlayTouchMapper.contacts(remaining, content).single()
+        assertEquals(1, contact.id)
+        assertTrue(contact.down)
+
+        val report = com.shilapi.xcertplay.airplay.AirPlayHid.touchReport(listOf(contact.copy(x = 10.0, y = 20.0)))
+        assertEquals("slot 0 is released", 0, report[1].toInt())
+        assertEquals("slot 1 holds the finger", 1, report[7].toInt())
+        assertEquals(10, report[8].toInt())
+        assertEquals(20, report[10].toInt())
+    }
+
+    @Test fun aThirdFingerIsNotSent() {
+        val event = pointers(MotionEvent.ACTION_MOVE, 0 to (100f to 100f), 1 to (200f to 200f), 2 to (300f to 300f))
+        assertEquals(listOf(0, 1), CarPlayTouchMapper.contacts(event, content).map { it.id })
+    }
+
+    private fun pointers(action: Int, vararg fingers: Pair<Int, Pair<Float, Float>>): MotionEvent {
+        val properties = fingers.map { (id, _) -> MotionEvent.PointerProperties().apply { this.id = id } }.toTypedArray()
+        val coords = fingers.map { (_, xy) -> MotionEvent.PointerCoords().apply { x = xy.first; y = xy.second } }.toTypedArray()
+        return MotionEvent.obtain(0, 0, action, fingers.size, properties, coords, 0, 0, 1f, 1f, 0, 0, 0, 0)
+    }
+
     private fun contact(action: Int, x: Float, y: Float) = MotionEvent.obtain(0, 0, action, x, y, 0).let {
         try {
             CarPlayTouchMapper.contacts(it, content).single()

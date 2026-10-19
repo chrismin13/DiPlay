@@ -70,6 +70,20 @@ class CarPlayHostResolutionTest {
         assertEquals(978, display.heightPixels)
     }
 
+    @Test fun nativeCanvasAboveTheHardwareDecoderStepsDownForTheSessionOnly() {
+        // Nexus 7 (2013): a 1920x1200 panel and OMX.qcom.video.decoder.avc limited to 1920x1088.
+        decoder(maxWidth = 1920, maxHeight = 1088)
+        val display = config(100, height = 1200).main
+        assertEquals(1728, display.widthPixels)
+        assertEquals(1080, display.heightPixels)
+        assertEquals(100, AirPlayPersistence.loadDisplayScalePercent(activity))
+    }
+
+    @Test fun nativeCanvasAboveASoftwareDecoderIsKept() {
+        decoder(maxWidth = 1920, maxHeight = 1088, hardware = false)
+        assertEquals(1200, config(100, height = 1200).main.heightPixels)
+    }
+
     @Test fun failedSmallerUiCanvasCanKeepASupportedSupersampledResolution() {
         decoder(maxWidth = 3120, maxHeight = 1700)
         val display = config(150, uiPercent = 75).main

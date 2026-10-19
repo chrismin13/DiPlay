@@ -26,6 +26,7 @@ import android.graphics.Typeface
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.LayerDrawable
+import android.media.MediaCodecInfo
 import android.media.MediaCodecList
 import android.media.MediaFormat
 import android.net.Uri
@@ -4775,17 +4776,14 @@ class CarPlayHostActivity : ComponentActivity() {
         } else decoderCanvasSupport(display)
 
     private fun decoderCanvasSupport(display: AirPlayDisplayConfig): CanvasSupport = try {
-        val mime = if (sessionHevc) MediaFormat.MIMETYPE_VIDEO_HEVC else MediaFormat.MIMETYPE_VIDEO_AVC
+        val mime = sessionVideoMime()
         // Match MediaCodec.createDecoderByType's first suitable decoder; do not silently force
         // an enlarged stream through a software decoder on a slower head unit.
-        val decoder = MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.firstOrNull {
-            !it.isEncoder && it.supportedTypes.any { type -> type.equals(mime, ignoreCase = true) }
-        }
+        val decoder = defaultVideoDecoder(mime)
         if (decoder == null) {
             CanvasSupport(false, "no_decoder", "Decoder capability mime=$mime result=no_decoder")
         } else {
-            val hardware = if (Build.VERSION.SDK_INT >= 29) decoder.isHardwareAccelerated
-                else !decoder.name.startsWith("OMX.google.") && !decoder.name.startsWith("c2.android.")
+            val hardware = isHardwareDecoder(decoder)
             val video = decoder.getCapabilitiesForType(mime).videoCapabilities
             val sizeSupported = video?.isSizeSupported(display.widthPixels, display.heightPixels) == true
             val rateSupported = sizeSupported && video?.areSizeAndRateSupported(
@@ -4808,6 +4806,37 @@ class CarPlayHostActivity : ComponentActivity() {
     } catch (error: Exception) {
         CanvasSupport(false, "capability_query_${error.javaClass.simpleName}",
             "Decoder capability query failed error=${error.javaClass.simpleName}")
+    }
+
+    private fun sessionVideoMime(): String =
+        if (sessionHevc) MediaFormat.MIMETYPE_VIDEO_HEVC else MediaFormat.MIMETYPE_VIDEO_AVC
+
+    private fun defaultVideoDecoder(mime: String): MediaCodecInfo? =
+        MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.firstOrNull {
+            !it.isEncoder && it.supportedTypes.any { type -> type.equals(mime, ignoreCase = true) }
+        }
+
+    private fun isHardwareDecoder(decoder: MediaCodecInfo): Boolean =
+        if (Build.VERSION.SDK_INT >= 29) decoder.isHardwareAccelerated
+        else !decoder.name.startsWith("OMX.google.") && !decoder.name.startsWith("c2.android.")
+
+    /**
+     * Whether the default hardware decoder takes [display] at its frame rate, or null without one. Sizes are
+     * rounded up to the decoder's alignment first: decoders crop an unaligned panel size, and only the size
+     * and rate limits make MediaCodec fall back to a software decoder.
+     */
+    private fun hardwareDecoderTakes(display: AirPlayDisplayConfig): Boolean? = try {
+        val mime = sessionVideoMime()
+        val decoder = defaultVideoDecoder(mime)
+        val video = decoder?.takeIf { isHardwareDecoder(it) && !(sessionHevc && hevcSoftwareDecoderEnabled) }
+            ?.getCapabilitiesForType(mime)?.videoCapabilities
+        video?.let {
+            fun align(pixels: Int, step: Int) = (pixels + step - 1) / step * step
+            it.areSizeAndRateSupported(align(display.widthPixels, it.widthAlignment),
+                align(display.heightPixels, it.heightAlignment), display.fps.toDouble())
+        }
+    } catch (_: Exception) {
+        null
     }
 
     private fun createAirPlayConfig(size: DisplaySize): AirPlayConfig {
@@ -4880,6 +4909,21 @@ class CarPlayHostActivity : ComponentActivity() {
                     getString(if (resolutionFallback) R.string.resolution_canvas_unsupported
                         else R.string.this_head_unit_cannot_use_the_smaller_size_at_this_resolut),
                     android.widget.Toast.LENGTH_LONG).show()
+            }
+        }
+        // The panel's own size can exceed the hardware decoder too (1920x1200 on a decoder limited to
+        // 1920x1088), and MediaCodec then quietly falls back to a software decoder that cannot keep up.
+        // Ask for the largest smaller canvas the hardware decoder accepts, for this session only.
+        if (hardwareDecoderTakes(scaledDisplay) == false) {
+            val fitted = CarPlayDisplayScale.fittingPercent(baseDisplay, displayScalePercent) {
+                hardwareDecoderTakes(CarPlayUiScale.apply(it, uiScalePercent)) == true
+            }
+            if (fitted != null) {
+                val requested = scaledDisplay
+                resolutionDisplay = CarPlayDisplayScale.applyPercent(baseDisplay, fitted)
+                scaledDisplay = CarPlayUiScale.apply(resolutionDisplay, uiScalePercent)
+                appendLog("CarPlay canvas ${requested.widthPixels}x${requested.heightPixels}@${requested.fps} exceeds " +
+                    "the hardware decoder; resolution ${displayScalePercent}% -> $fitted% for this session")
             }
         }
         appendLog("CarPlay size=${CarPlayUiScale.label(uiScalePercent)} canvas=${scaledDisplay.widthPixels}x${scaledDisplay.heightPixels}")

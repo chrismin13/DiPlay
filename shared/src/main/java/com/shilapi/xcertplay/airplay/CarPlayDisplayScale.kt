@@ -40,6 +40,15 @@ object CarPlayDisplayScale {
         return display.copy(widthPixels = scale(display.widthPixels), heightPixels = scale(display.heightPixels))
     }
 
+    /**
+     * The largest percentage from [percent] down to [MIN_PERCENT] whose canvas the decoder [fits], or null
+     * when none does. A 1920x1200 panel exceeds the 1920x1088 limit of older hardware H.264 decoders, which
+     * then lose the stream to a software decoder; a slightly smaller canvas keeps it on the hardware.
+     */
+    fun fittingPercent(display: AirPlayDisplayConfig, percent: Int, fits: (AirPlayDisplayConfig) -> Boolean): Int? =
+        (percent.coerceIn(MIN_PERCENT, MAX_PERCENT) downTo MIN_PERCENT)
+            .firstOrNull { fits(applyPercent(display, it)) }
+
     private fun scalePixels(pixels: Int, tenths: Int): Int {
         require(pixels > 0) { "pixels must be positive" }
         val scaled = ((pixels.toLong() * tenths + 5L) / 10L).toInt().coerceAtLeast(1)

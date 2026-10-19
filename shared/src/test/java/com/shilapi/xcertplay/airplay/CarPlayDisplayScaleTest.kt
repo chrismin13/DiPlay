@@ -1,6 +1,7 @@
 package com.shilapi.xcertplay.airplay
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 class CarPlayDisplayScaleTest {
@@ -50,6 +51,20 @@ class CarPlayDisplayScaleTest {
         assertEquals(1566, widened.heightPixels)
         assertEquals(native.widthPhysicalMm, widened.widthPhysicalMm)
         assertEquals(widened, CarPlayDisplayScale.applyPercent(native, CarPlayDisplayScale.MAX_PERCENT + 60))
+    }
+
+    @Test fun fittingPercentStepsDownToTheDecoderLimit() {
+        // Nexus 7 (2013): OMX.qcom.video.decoder.avc accepts at most 1920x1088.
+        val native = AirPlayDisplayConfig(widthPixels = 1920, heightPixels = 1200)
+        val percent = CarPlayDisplayScale.fittingPercent(native, 100) { it.widthPixels <= 1920 && it.heightPixels <= 1088 }
+        assertEquals(90, percent)
+        assertEquals(1080, CarPlayDisplayScale.applyPercent(native, 90).heightPixels)
+    }
+
+    @Test fun fittingPercentKeepsASupportedCanvasAndReportsNoFit() {
+        val native = AirPlayDisplayConfig(widthPixels = 1280, heightPixels = 720)
+        assertEquals(70, CarPlayDisplayScale.fittingPercent(native, 70) { true })
+        assertNull(CarPlayDisplayScale.fittingPercent(native, 100) { false })
     }
 
 }

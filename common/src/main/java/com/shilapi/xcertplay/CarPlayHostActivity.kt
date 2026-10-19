@@ -410,6 +410,9 @@ class CarPlayHostActivity : ComponentActivity() {
     private var settingsMenu: View? = null
     private var settingsMenuCategoryKey = "connection"
     private var settingsMenuContentScroll: ScrollView? = null
+    // The [settingsMenuState] the built menu's controls show, or null once they may show something else.
+    // Values, not a hash: a collision would show a discarded edit. It holds the fields' own strings.
+    private var settingsMenuShows: List<Any?>? = null
     private var mfiTargetGroup: RadioGroup? = null
     private var mfiI2cFields: View? = null
     private var mfiRemoteFields: View? = null
@@ -3424,7 +3427,28 @@ class CarPlayHostActivity : ComponentActivity() {
         this.hotspotStatusView = hotspotStatusView
         updateHotspotStatusBlock()
         updateResolutionMenu()
+        settingsMenuShows = settingsMenuState()
         return overlay
+    }
+
+    /**
+     * Everything [buildSettingsMenu] reads that a driver or the session can change. While it equals
+     * [settingsMenuShows], the built menu already shows it.
+     */
+    private fun settingsMenuState(): List<Any?> = menuSettingsValues() + listOf(
+        hideBydCallPopup, sidePanelShown, sessionDisplay?.viewAreas?.sidePanel() != null,
+        advancedAudioChannelMappingSupported, appNight, settingsMenuCategoryKey,
+        resources.configuration.densityDpi, resources.configuration.fontScale,
+        resources.configuration.locales.toLanguageTags(), resources.configuration.layoutDirection,
+    )
+
+    /** Brings a reused menu's status lines, icon and messages up to date, as a new menu would show them. */
+    private fun refreshReusedSettingsMenu() {
+        updateMfiTargetFields()
+        updateManualHotspotFields()
+        manualHotspotErrorView?.visibility = View.GONE
+        updateHotspotStatusBlock()
+        updateAirPlayIconPreview()
     }
 
     private fun persistMenuSettings() {
@@ -3488,8 +3512,10 @@ class CarPlayHostActivity : ComponentActivity() {
         message.post { message.requestRectangleOnScreen(Rect(0, 0, message.width, message.height), true) }
     }
 
+    private fun menuSettingsSignature(): Int = menuSettingsValues().joinToString("|").hashCode()
+
     /** Mirrors [persistMenuSettings]: a field staged there belongs here too. */
-    private fun menuSettingsSignature(): Int = listOf(
+    private fun menuSettingsValues(): List<Any?> = listOf(
         gestureFingerCount, wirelessEnabled, mfiTarget, mfiI2cPath, remoteMfiServer, remoteMfiToken,
         wirelessHotspotMode, existingWifiSsid, existingWifiPassphrase, manualHotspotSsid,
         manualHotspotPassphrase, manualHotspotBand, manualHotspotChannel, manualHotspotSecurity,
@@ -3498,7 +3524,7 @@ class CarPlayHostActivity : ComponentActivity() {
         hevcSoftwareDecoderEnabled, manufacturer, model, oemLabel, debugLogsEnabled, rightHandDrive,
         carPlayDock, hideTopBar, hideBottomBar, temporarySystemBarsEnabled,
         safeAreaDrawOutside, mainDisplayDisableSafeArea, blackCornerRadiusDp,
-    ).joinToString("|").hashCode()
+    )
 
     private fun captureSettingsBaseline(): SettingsBaseline {
         val safeAreaSize = currentActivitySize()
@@ -6084,8 +6110,13 @@ class CarPlayHostActivity : ComponentActivity() {
         settingsBaseline = captureSettingsBaseline()
         menuSettingsSignature = menuSettingsSignature()
         menuWirelessNetworkSignature = wirelessNetworkSignature()
-        // Rebuild controls from saved values so a cancelled edit cannot reappear on reopening.
+        // Rebuild controls from saved values only when they may show something else, so a cancelled edit
+        // cannot reappear. Building every control froze a Nexus 7 for most of a second on each opening.
         settingsMenu?.let { previous ->
+            if (settingsMenuShows == settingsMenuState()) {
+                refreshReusedSettingsMenu()
+                return@let
+            }
             val parent = previous.parent as ViewGroup
             val index = parent.indexOfChild(previous)
             parent.removeView(previous)
@@ -6146,13 +6177,18 @@ class CarPlayHostActivity : ComponentActivity() {
             return
         }
         persistMenuSettings()
+        settingsMenuShows = settingsMenuState()
         settingsBaseline = null
         finishSettingsMenu("Settings saved", reconnect = true)
     }
 
     private fun cancelSettingsEdits() {
         if (!menuOpen) return
+        // Each control writes its field, so these are what the controls show until the restore below.
+        val shown = settingsMenuState()
         restoreSettingsBaseline()
+        // A discarded edit is still on its control: the next opening builds the menu again.
+        settingsMenuShows = shown.takeIf { it == settingsMenuState() }
         finishSettingsMenu("Settings changes discarded", reconnect = false)
     }
 

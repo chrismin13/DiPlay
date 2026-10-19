@@ -37,6 +37,14 @@ internal object AirPlayIconSizing {
         return bytes?.let { MAX_PIXELS to it }
     }
 
+    /** The largest power-of-two subsample that keeps both sides of a [width]x[height] image at least [targetPixels]. */
+    fun previewSampleSize(width: Int, height: Int, targetPixels: Int): Int {
+        var sample = 1
+        if (width <= 0 || height <= 0 || targetPixels <= 0) return sample
+        while (minOf(width, height) / (sample * 2) >= targetPixels) sample *= 2
+        return sample
+    }
+
     private fun replace(bitmap: Bitmap, size: Int): Bitmap {
         val scaled = Bitmap.createScaledBitmap(bitmap, size, size, true)
         if (scaled !== bitmap) bitmap.recycle()
